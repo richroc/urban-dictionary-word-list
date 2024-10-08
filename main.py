@@ -8,7 +8,7 @@ import re
 
 API = "https://www.urbandictionary.com/browse.php?character={0}"
 
-MAX_ATTEMPTS = 4
+MAX_ATTEMPTS = 2
 DELAY = 10
 
 NUMBER_SIGN = "#"
@@ -24,18 +24,20 @@ urllib.request.install_opener(opener)
 
 def extract_page_entries(letter, html):
     soup = BeautifulSoup(html, "html.parser")
-    columnist = soup.find(id="columnist")
-    if not columnist:
-        return
-    ul_list = columnist.find('ul')
+
+    # Updated parsing logic
+    # Find the <ul> element that contains the words
+    ul_list = soup.find('ul', {'class': 'mt-3 columns-2 md:columns-3'})
     if not ul_list:
+        print("No <ul> with the expected class found.")
         return
+
     for li in ul_list.find_all('li'):
         a_tag = li.find('a')
-        if a_tag and a_tag.string:
-            a = a_tag.string
+        if a_tag and a_tag.text:
+            a = a_tag.text.strip()
             if letter == NUMBER_SIGN:
-                if not re.match('[a-zA-Z]', a):
+                if not re.match('^[a-zA-Z]', a):
                     yield a
             else:
                 if a.lower().startswith(letter.lower()):
@@ -43,28 +45,34 @@ def extract_page_entries(letter, html):
 
 def get_next(letter, html):
     soup = BeautifulSoup(html, "html.parser")
-    next_link = soup.find('a', {"rel": "next"})
+    next_link = soup.find('a', attrs={"aria-label": "Next page"})
     if next_link:
-        href = next_link['href']
+        href = next_link.get('href')
         return 'https://www.urbandictionary.com' + href
     return None
 
 def extract_letter_entries(letter):
     if letter == NUMBER_SIGN:
-        start = '*'  # URL-encoded '#'
+        start = '*'  # Urban Dictionary uses '*' for non-alphabetic characters.
     else:
-        start = letter + 'a'
+        start = letter
     url = API.format(start)
     attempt = 0
     while url:
-        print(url)
+        print(f"Fetching URL: {url}")
         try:
             req = urllib.request.Request(url, headers=headers)
             response = urllib.request.urlopen(req)
             code = response.getcode()
             if code == 200:
                 content = response.read().decode('utf-8')
-                yield list(extract_page_entries(letter, content))
+                entries = list(extract_page_entries(letter, content))
+                if entries:
+                    yield entries
+                else:
+                    print(f"No entries found on page: {url}")
+                    # Stop fetching next pages if no entries are found
+                    break
                 url = get_next(letter, content)
                 attempt = 0
             else:
@@ -75,37 +83,47 @@ def extract_letter_entries(letter):
                 time.sleep(DELAY * attempt)
         except Exception as e:
             print(f"Error fetching {url}: {e}")
-            break
+            attempt += 1
+            if attempt > MAX_ATTEMPTS:
+                break
+            time.sleep(DELAY * attempt)
         time.sleep(DELAY)
 
-def download_letter_entries(letter, file):
+def download_letter_entries(letter, file, verbose=False):
     file = file.format(letter)
     directory = os.path.dirname(file)
     if directory:
         os.makedirs(directory, exist_ok=True)
     for entry_set in extract_letter_entries(letter):
+        if verbose:
+            for word in entry_set:
+                print(word)
         with open(file, 'a', encoding='utf-8') as f:
             data = ('\n'.join(entry_set))
             f.write(data + '\n')
 
-def download_entries(letters, file):
+def download_entries(letters, file, verbose=False):
     for letter in letters:
-        print(f"======={letter}=======")
-        download_letter_entries(letter, file)
+        print(f"======= {letter} =======")
+        download_letter_entries(letter, file, verbose)
 
-parser = argparse.ArgumentParser(description='Process some integers.')
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Scrape words from Urban Dictionary.')
 
-parser.add_argument('--ifile', dest='ifile',
-                    help='Input file name. Contains a list of letters separated by a newline', default="input.list")
+    parser.add_argument('--ifile', dest='ifile',
+                        help='Input file name. Contains a list of letters separated by a newline', default="input.list")
 
-parser.add_argument('--out', dest='out',
-                    help='Output file name. May be a format string', default="data/{0}.data")
+    parser.add_argument('--out', dest='out',
+                        help='Output file name. May be a format string', default="{0}.data")
 
-args = parser.parse_args()
+    parser.add_argument('--verbose', action='store_true',
+                        help='Print scraped words to stdout')
 
-letters = []
-with open(args.ifile, 'r') as ifile:
-    for row in ifile:
-        letters.append(row.strip())
+    args = parser.parse_args()
 
-download_entries(letters, args.out)
+    letters = []
+    with open(args.ifile, 'r') as ifile:
+        for row in ifile:
+            letters.append(row.strip())
+
+    download_entries(letters, args.out, verbose=args.verbose)
